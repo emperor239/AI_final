@@ -6,14 +6,13 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from transformers import BertTokenizer, BertModel
 from torchvision.models import resnet18
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, classification_report
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import random
 import warnings
 warnings.filterwarnings("ignore")
-
-# 从数据读取模块加载数据（保持你的原有逻辑）
+import time
 from 数据读取 import load_train_valid_test
 
 # 固定随机种子
@@ -42,13 +41,13 @@ def count_model_parameters(model):
     
     return total_params, trainable_params
 
-# 多模态数据集类（修复图像格式处理、兼容224×224）
+# 多模态数据集类
 class MultiModalDataset(Dataset):
     def __init__(self, data, text_tokenizer, image_transform=None, image_size=224):
         self.data = data
         self.text_tokenizer = text_tokenizer
         self.image_transform = image_transform
-        self.image_size = image_size  # 显式指定图像尺寸
+        self.image_size = image_size  
         self.label2idx = {'positive':0, 'neutral':1, 'negative':2}
         self.text_max_len = 32
     
@@ -56,7 +55,6 @@ class MultiModalDataset(Dataset):
         return len(self.data)
     
     def __getitem__(self, idx):
-        # 兼容空占位数据，严格返回224×224张量
         if len(self.data) == 0:
             return {
                 'image': torch.randn(3, self.image_size, self.image_size),
@@ -68,7 +66,7 @@ class MultiModalDataset(Dataset):
         
         sample = self.data[idx]
         
-        # 文本处理（原有逻辑不变）
+        # 文本处理
         text = sample.get('txt_content', '')
         text_encoding = self.text_tokenizer(
             text,
@@ -80,23 +78,20 @@ class MultiModalDataset(Dataset):
         input_ids = text_encoding['input_ids'].squeeze(0)
         attention_mask = text_encoding['attention_mask'].squeeze(0)
         
-        # 图像处理（核心修复：兼容PIL、强制224×224、处理变换）
+        # 图像处理
         image = sample.get('jpg_content')
-        # 基础变换：无论是否传自定义变换，都保证转为224×224张量
         basic_transform = transforms.Compose([
             transforms.Resize((self.image_size, self.image_size)),
             transforms.ToTensor()
         ])
         if image is not None:
-            image = basic_transform(image)  # 先做基础尺寸/格式转换
-            # 再应用自定义变换（训练集增强+归一化/验证集仅归一化）
+            image = basic_transform(image)  
             if self.image_transform is not None:
                 image = self.image_transform(image)
         else:
-            # 图像为空时，返回随机224×224张量兜底
             image = torch.randn(3, self.image_size, self.image_size)
         
-        # 标签处理（原有逻辑不变）
+        # 标签处理
         if sample.get('tag') is None:
             label = torch.tensor(0, dtype=torch.long)
         else:
@@ -111,7 +106,7 @@ class MultiModalDataset(Dataset):
             'attention_mask': attention_mask
         }
 
-# 文本特征提取器（原有逻辑不变）
+# 文本特征提取器
 class TextFeatureExtractor(nn.Module):
     def __init__(
         self, 
@@ -165,7 +160,7 @@ class TextFeatureExtractor(nn.Module):
         text_feature = self.fc(cls_hidden)
         return text_feature
 
-# 图像特征提取器（适配224×224输入，原有逻辑不变）
+# 图像特征提取器
 class ImageFeatureExtractor(nn.Module):
     def __init__(
         self, 
@@ -178,23 +173,22 @@ class ImageFeatureExtractor(nn.Module):
         self.resnet = resnet18(weights=None)
         self.hidden_dim = hidden_dim 
         
-        # 加载本地权重（兼容权重文件不存在的简易兜底）
+        # 加载本地权重
         try:
             local_weights = torch.load(local_resnet_path, map_location='cpu')
             self.resnet.load_state_dict(local_weights)
         except:
             print(f"本地ResNet权重加载失败，使用随机初始化权重")
         
-        # 移除最后一层全连接层（ResNet18适配224×224输入，输出512维特征）
         self.resnet = nn.Sequential(*list(self.resnet.children())[:-1])
         
         # 冻结指定层
         resnet_params = list(self.resnet.parameters())
-        freeze_num = min(freeze_resnet_layers, len(resnet_params))  # 防止索引越界
+        freeze_num = min(freeze_resnet_layers, len(resnet_params))  
         for param in resnet_params[:freeze_num]:
             param.requires_grad = False
         
-        # 特征投影层（224×224输入对应512维特征，无需修改）
+        # 特征投影层
         self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(512, hidden_dim),
@@ -207,7 +201,7 @@ class ImageFeatureExtractor(nn.Module):
         image_feature = self.fc(features)
         return image_feature
 
-# 早期融合模型（支持消融实验，原有逻辑不变）
+# 早期融合模型
 class EarlyFusionModel(nn.Module):
     def __init__(
         self,
@@ -249,7 +243,7 @@ class EarlyFusionModel(nn.Module):
         
         return probs
 
-# 绘制训练曲线（原有逻辑不变）
+# 绘制训练曲线
 def plot_training_curve(history, model_name):
     epochs = range(1, len(history['train_losses']) + 1)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
@@ -259,6 +253,7 @@ def plot_training_curve(history, model_name):
     ax1.set_title(f'{model_name} - 损失变化')
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss')
+    ax1.set_ylim(0, 2.0)
     ax1.grid(alpha=0.3)
     ax1.legend()
     
@@ -271,9 +266,9 @@ def plot_training_curve(history, model_name):
     ax2.legend()
     
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"{model_name}")
 
-# 早期融合通用训练评估函数（原有逻辑不变）
+# 早期融合通用训练评估函数
 def run_early_fusion_exp(
     model, train_loader, valid_loader, criterion, optimizer, device, 
     epochs, patience, exp_name, only_text=False, only_image=False
@@ -286,7 +281,6 @@ def run_early_fusion_exp(
     for epoch in range(epochs):
         model.train()
         total_train_loss = 0.0
-        # 训练进度条
         pbar_train = tqdm(
             enumerate(train_loader), 
             total=len(train_loader), 
@@ -300,7 +294,7 @@ def run_early_fusion_exp(
             images = batch['image'].to(device)
             labels = batch['label'].to(device)
             
-            # 前向传播（传入消融参数）
+            # 前向传播
             probs = model(input_ids, attention_mask, images, only_text, only_image)
             loss = criterion(torch.log(probs), labels)
             
@@ -345,10 +339,10 @@ def run_early_fusion_exp(
                 
                 pbar_valid.set_postfix(batch_loss=f"{batch_loss:.4f}")
         
-        # 计算验证指标（兼容空数据加载器）
+        # 计算验证指标
         avg_valid_loss = total_valid_loss / len(valid_loader) if len(valid_loader) > 0 else 0.0
         valid_acc = 0.0
-        if all_probs and all_labels:  # 更鲁棒的非空判断
+        if all_probs and all_labels:  
             try:
                 all_probs = torch.cat(all_probs, dim=0).cpu().numpy()
                 all_labels = torch.cat(all_labels, dim=0).cpu().numpy()
@@ -357,12 +351,10 @@ def run_early_fusion_exp(
             except Exception as e:
                 print(f"计算准确率异常：{e}")
         
-        # 记录历史
         history['train_losses'].append(avg_train_loss)
         history['valid_losses'].append(avg_valid_loss)
         history['valid_accs'].append(valid_acc)
         
-        # 打印日志
         print(f"[{exp_name}] Epoch {epoch+1}/{epochs} | 训练损失：{avg_train_loss:.4f} | 验证损失：{avg_valid_loss:.4f} | 验证准确率：{valid_acc:.4f}")
         
         # 早停逻辑
@@ -383,31 +375,69 @@ def run_early_fusion_exp(
     # 绘制训练曲线
     plot_training_curve(history, exp_name)
     
-    # 加载最佳模型返回最终准确率
     model.load_state_dict(torch.load(f'best_early_fusion_{exp_name}.pth', map_location=device))
     
     return best_acc, history
 
-# 主函数：训练+消融实验（完整224×224图像处理配置）
+# 分类报告评估函数
+def evaluate_exp_classification_report(model, valid_loader, device, exp_scene, target_names=['positive', 'neutral', 'negative']):
+    model.eval()
+    all_preds = []
+    all_true = []
+    only_text = (exp_scene == 'only_text')
+    only_image = (exp_scene == 'only_image')
+    
+    with torch.no_grad():
+        pbar_eval = tqdm(enumerate(valid_loader), total=len(valid_loader), desc=f"[{exp_scene}] 分类报告评估")
+        for batch_idx, batch in pbar_eval:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            images = batch['image'].to(device)
+            labels = batch['label'].to(device)
+            
+            # 前向传播（适配消融实验场景）
+            probs = model(input_ids, attention_mask, images, only_text, only_image)
+            preds = np.argmax(probs.cpu().numpy(), axis=1)
+            true = labels.cpu().numpy()
+            
+            all_preds.extend(preds)
+            all_true.extend(true)
+    
+    
+    exp_name_mapping = {
+        'full_fusion': '完整早期融合（文本+图像）',
+        'only_text': '仅文本模态（消融图像）',
+        'only_image': '仅图像模态（消融文本）'
+    }
+    print("\n" + "="*80)
+    print(f"{exp_name_mapping[exp_scene]} - 验证集分类报告（Precision/Recall/F1-Score）：")
+    print("="*80)
+    print(classification_report(all_true, all_preds, target_names=target_names, digits=4))
+    eval_acc = accuracy_score(all_true, all_preds)
+    print(f"验证集整体准确率（分类报告复核）：{eval_acc:.4f}")
+    print("="*80)
+    return eval_acc, all_true, all_preds
+
+# 主函数：训练+消融实验
 if __name__ == "__main__":
-    # 超参数配置（核心：IMAGE_SIZE=224固定）
+    # 超参数配置
     BATCH_SIZE = 16
-    EPOCHS = 2  # 恢复合理训练轮数
-    PATIENCE = 5
+    EPOCHS = 18  #
+    PATIENCE = 4
     LEARNING_RATE = 1e-4
-    IMAGE_SIZE = 224  # 显式指定224×224图像尺寸
+    IMAGE_SIZE = 224  #
     TEXT_MAX_LEN = 32
-    NUM_WORKERS = 2 if torch.cuda.is_available() else 0  # 兼容CPU运行
+    NUM_WORKERS = 2 if torch.cuda.is_available() else 0  
     
     # 文本分支参数
     TEXT_FREEZE_EMBEDDINGS = True
-    TEXT_FREEZE_ENCODER_LAYERS = 6   # 0-12
+    TEXT_FREEZE_ENCODER_LAYERS = 2   # 0-12
     TEXT_HIDDEN_DIM = 256
     TEXT_DROPOUT = 0.3
     TEXT_ACTIVATION = 'gelu'
     
     # 图像分支参数
-    IMAGE_FREEZE_RESNET_LAYERS = 3   # 0-5（ResNet18共5层主卷积）
+    IMAGE_FREEZE_RESNET_LAYERS = 2   # 0-5
     IMAGE_HIDDEN_DIM = 256
     IMAGE_DROPOUT = 0.3
     
@@ -415,19 +445,19 @@ if __name__ == "__main__":
     FUSION_HIDDEN_DIM = 1024
     FUSION_DROPOUT = 0.3
     
-    # 设备配置（兼容CPU/GPU）
+    # 设备配置
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"当前使用设备：{device}")
     print(f"图像输入尺寸：{IMAGE_SIZE}×{IMAGE_SIZE}")
     
-    # 数据加载（确保返回PIL格式图像，与数据集类匹配）
+    # 数据加载
     train_data, valid_data, test_data = load_train_valid_test(picture="PIL")
     print(f"数据加载完成：训练集{len(train_data)} | 验证集{len(valid_data)} | 测试集{len(test_data)}")
     
     # 初始化Bert分词器
     text_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', cache_dir=None)
     
-    # 图像变换（核心修复：仅做归一化/增强，尺寸/ToTensor在数据集类内完成，避免类型错误）
+    # 图像变换
     train_image_transform = transforms.Compose([
         transforms.RandomHorizontalFlip(p=0.5),  # 仅训练集增强
         transforms.Normalize(mean=[0.6313, 0.6022, 0.5861], std=[0.3512, 0.3568, 0.3625])
@@ -436,7 +466,7 @@ if __name__ == "__main__":
         transforms.Normalize(mean=[0.6313, 0.6022, 0.5861], std=[0.3512, 0.3568, 0.3625])
     ])
     
-    # 构建数据集和数据加载器（传入IMAGE_SIZE，显式指定224×224）
+    # 构建数据集和数据加载器
     train_dataset = MultiModalDataset(
         train_data, text_tokenizer, 
         image_transform=train_image_transform, 
@@ -447,7 +477,7 @@ if __name__ == "__main__":
         image_transform=val_test_image_transform, 
         image_size=IMAGE_SIZE
     )
-    # 数据加载器配置（兼容CPU，关闭pin_memory）
+    # 数据加载器配置
     train_loader = DataLoader(
         train_dataset, batch_size=BATCH_SIZE, shuffle=True,
         num_workers=NUM_WORKERS, pin_memory=torch.cuda.is_available(),
@@ -459,7 +489,7 @@ if __name__ == "__main__":
         prefetch_factor=2 if torch.cuda.is_available() else 1
     )
     
-    # 初始化特征提取器和融合模型（移至设备）
+    # 初始化特征提取器和融合模型
     text_encoder = TextFeatureExtractor(
         freeze_embeddings=TEXT_FREEZE_EMBEDDINGS,
         freeze_encoder_layers=TEXT_FREEZE_ENCODER_LAYERS,
@@ -495,6 +525,7 @@ if __name__ == "__main__":
     
     # 实验1：完整早期融合（文本+图像）- 基准实验
     print("\n--- 实验1：完整早期融合（文本+图像）---")
+    start = time.time()
     optimizer1 = optim.AdamW(early_fusion_model.parameters(), lr=LEARNING_RATE)
     exp_results['full_fusion'], _ = run_early_fusion_exp(
         model=early_fusion_model,
@@ -507,9 +538,12 @@ if __name__ == "__main__":
         patience=PATIENCE,
         exp_name="full_fusion"
     )
+    end = time.time()
+    print(f"耗时{end-start}")
     
     # 实验2：消融实验 - 仅文本模态（屏蔽图像）
     print("\n--- 实验2：消融实验 - 仅文本模态 ---")
+    start = time.time()
     optimizer2 = optim.AdamW(early_fusion_model.parameters(), lr=LEARNING_RATE)
     exp_results['only_text'], _ = run_early_fusion_exp(
         model=early_fusion_model,
@@ -523,10 +557,13 @@ if __name__ == "__main__":
         exp_name="only_text",
         only_text=True
     )
+    end = time.time()
+    print(f"耗时{end-start}")
     
     # 实验3：消融实验 - 仅图像模态（屏蔽文本）
     print("\n--- 实验3：消融实验 - 仅图像模态 ---")
     optimizer3 = optim.AdamW(early_fusion_model.parameters(), lr=LEARNING_RATE)
+    start = time.time()
     exp_results['only_image'], _ = run_early_fusion_exp(
         model=early_fusion_model,
         train_loader=train_loader,
@@ -539,6 +576,8 @@ if __name__ == "__main__":
         exp_name="only_image",
         only_image=True
     )
+    end = time.time()
+    print(f"耗时{end-start}")
     
     # 消融实验结果汇总
     print("\n" + "="*70)
@@ -552,3 +591,11 @@ if __name__ == "__main__":
         elif exp_name == 'only_image':
             print(f"仅图像模态（消融文本）：{acc:.4f}")
     print("="*70)
+    
+    # 输出三个实验的分类报告
+    print("\n" + "="*90)
+    print("早期融合消融实验 - 分类报告详细汇总")
+    print("="*90)
+    for exp_scene in ['full_fusion', 'only_text', 'only_image']:
+        early_fusion_model.load_state_dict(torch.load(f'best_early_fusion_{exp_scene}.pth', map_location=device))
+        evaluate_exp_classification_report(early_fusion_model, valid_loader, device, exp_scene)
