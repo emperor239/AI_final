@@ -70,7 +70,6 @@
     - Attention Is All You Need 中学习Transformer架构
     - https://b23.tv/7rzMhH0 中学习BERT架构
 - RESNET-18相关
-    - 
     - https://b23.tv/GkU4A1W 中学习RESNET-18架构
 - CLIP相关
     - Learning Transferable Visual Models From Natural Language Supervision 中了解CLIP架构
